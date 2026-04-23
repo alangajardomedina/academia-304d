@@ -1,11 +1,16 @@
 services:
   mysql:
     image: mysql:8
+    container_name: academia-mysql
     environment:
-      MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: asistencia_db
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
     ports:
       - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - academia-net
     healthcheck:
       test: ["CMD","mysqladmin","ping","-h","localhost"]
       interval: 10s
@@ -14,19 +19,31 @@ services:
 
   backend:
     build: ./backend
+    image: academia-backend:1.0
     ports:
       - "8080:8080"
     environment:
-      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/asistencia_db
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/${MYSQL_DATABASE}
       SPRING_DATASOURCE_USERNAME: root
-      SPRING_DATASOURCE_PASSWORD: root
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD}
     depends_on:
       mysql:
         condition: service_healthy
+    networks:
+      - academia-net
 
   frontend:
     build: ./frontend
+    image: academia-frontend:1.0
     ports:
       - "3000:80"
     depends_on:
       - backend
+    networks:
+      - academia-net
+
+volumes:
+  mysql_data:
+
+networks:
+  academia-net:
