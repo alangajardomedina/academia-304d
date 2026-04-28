@@ -1,4 +1,4 @@
-const API = "http://localhost:8080/api";
+const API = "/api";
 
 export async function getUsuarios() {
   const res = await fetch(`${API}/usuarios`);
