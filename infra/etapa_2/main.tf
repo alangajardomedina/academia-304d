@@ -54,6 +54,12 @@ resource "aws_security_group" "main" {
   vpc_id = aws_vpc.main.id
 
   ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  ingress {
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
@@ -67,19 +73,20 @@ resource "aws_security_group" "main" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  ingress {
-    from_port   = 3306
-    to_port     = 3306
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
   egress {
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
+}
+resource "aws_security_group_rule" "mysql_internal" {
+  type                     = "ingress"
+  from_port                = 3306
+  to_port                  = 3306
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.main.id
+  source_security_group_id = aws_security_group.main.id
 }
 
 ############################
@@ -117,20 +124,53 @@ resource "aws_instance" "db" {
   vpc_security_group_ids = [aws_security_group.main.id]
   key_name               = var.key_pair_name
 
-  user_data = <<-EOF
-#!/bin/bash
-yum update -y
-yum install -y docker
-systemctl start docker
-systemctl enable docker
+  # 🔹 Aumenta disco (clave)
+  root_block_device {
+    volume_size = 20
+    volume_type = "gp3"
+  }
 
-docker run -d \
---name mysql \
--e MYSQL_ROOT_PASSWORD=${var.db_password} \
--e MYSQL_DATABASE=${var.db_name} \
--p 3306:3306 \
-mysql:8
-EOF
+  user_data = <<-EOF
+    #!/bin/bash
+
+    yum update -y
+    yum install -y docker
+
+    systemctl start docker
+    systemctl enable docker
+
+    # Esperar a que Docker esté realmente listo
+    until docker info > /dev/null 2>&1; do
+      echo "Esperando Docker..."
+      sleep 3
+    done
+
+    # Limpiar espacio por si acaso
+    docker system prune -af
+
+    # Levantar MySQL optimizado
+    docker run -d \
+    --name mysql \
+    -e MYSQL_ROOT_PASSWORD=root \
+    -e MYSQL_DATABASE=asistencia_db \
+    -e MYSQL_ROOT_HOST=% \
+    -p 3306:3306 \
+    --log-opt max-size=10m \
+    --log-opt max-file=3 \
+    mysql:8-oracle \
+    --bind-address=0.0.0.0 \
+    --performance-schema=OFF
+  EOF
+
+  tags = {
+    Name = "${var.project_name}-mysql"
+  }
+}
+
+#CLOUD WATCH
+resource "aws_cloudwatch_log_group" "ecs" {
+  name              = "/ecs/${var.project_name}"
+  retention_in_days = 7
 }
 
 ############################
@@ -169,27 +209,39 @@ resource "aws_ecs_task_definition" "app" {
         }
       ]
       healthCheck = {
-        command  = ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health || exit 1"]
-        interval  = 30
-        timeout  = 5
-        retries  = 3
-        startPeriod = 60 
+        command     = ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health/readiness || exit 1"]
+        interval    = 30
+        timeout     = 5
+        retries     = 5
+        startPeriod = 120
       }
 
       environment = [
         {
+            name  = "DB_HOST",
+            value = aws_instance.db.private_ip
+        },
+        {
             name  = "SPRING_DATASOURCE_URL"
-            value = "jdbc:mysql://${aws_instance.db.private_ip}:3306/${var.db_name}"
+            value = "jdbc:mysql://${aws_instance.db.private_ip}:3306/asistencia_db"
         },
         {
             name  = "SPRING_DATASOURCE_USERNAME"
-            value = "${var.db_user}"
+            value = "root"
         },
         {
             name  = "SPRING_DATASOURCE_PASSWORD"
-            value = "${var.db_password}"
+            value = "root"
         }
       ]
+      logConfiguration = {
+        logDriver = "awslogs",
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.ecs.name,
+          awslogs-region        = var.aws_region,
+          awslogs-stream-prefix = "backend"
+        }
+      }
     },
 
     {
@@ -205,9 +257,17 @@ resource "aws_ecs_task_definition" "app" {
       dependsOn = [
         {
           containerName = "backend",
-          condition = "HEALTHY"
+          condition = "START"
         }
       ]
+      logConfiguration = {
+        logDriver = "awslogs",
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.ecs.name,
+          awslogs-region        = var.aws_region,
+          awslogs-stream-prefix = "frontend"
+        }
+      }
     }
 
   ])
@@ -225,6 +285,9 @@ resource "aws_ecs_service" "app" {
   desired_count   = 1
 
   force_new_deployment = true
+
+  deployment_minimum_healthy_percent = 0
+  deployment_maximum_percent         = 100
 
   network_configuration {
     subnets          = [aws_subnet.public.id]
