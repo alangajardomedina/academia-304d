@@ -1,0 +1,54 @@
+name: Despliegue en AWS
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  AWS_REGION: us-east-1
+  CLUSTER: devops-u2-cluster
+  SERVICE: app
+  #secrets de github: para datos sensibles.
+
+#Antes de todo esto, manualmente ejecute Terraform
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v3
+
+      - name: Configurar las credenciales de AWS
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{secrets.AWS_ACCESS_KEY_ID}}
+          aws-secret-access-key: ${{secrets.AWS_SECRET_ACCESS_KEY}}
+          aws-session-token: ${{secrets.AWS_SESSION_TOKEN}}
+          aws-region: ${{env.AWS_REGION}}
+      
+      - name: Login en ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      
+      - name: Build y Push de imagen backend
+        run: |
+          docker build --platform linux/amd64 \
+          -t ${{secrets.AWS_ACCOUNT_ID}}.dkr.ecr.${{env.AWS_REGION}}.amazonaws.com/devops-u2-backend:latest \
+          ./backend
+          docker push ${{secrets.AWS_ACCOUNT_ID}}.dkr.ecr.${{env.AWS_REGION}}.amazonaws.com/devops-u2-backend:latest
+
+      - name: Build y Push de imagen frontend
+        run: |
+          docker build --platform linux/amd64 \
+          -t ${{secrets.AWS_ACCOUNT_ID}}.dkr.ecr.${{env.AWS_REGION}}.amazonaws.com/devops-u2-frontend:latest \
+          ./frontend
+          docker push ${{secrets.AWS_ACCOUNT_ID}}.dkr.ecr.${{env.AWS_REGION}}.amazonaws.com/devops-u2-frontend:latest
+      
+      - name: Forzar un redespliegue en ECS
+        run: |
+          aws ecs update-service \
+          --cluster ${{env.CLUSTER}} \
+          --service ${{env.SERVICE}} \
+          --force-new-deployment
